@@ -29,11 +29,11 @@ public abstract class BaseMessageReceiver extends BroadcastReceiver{
         this.icon = icon;
     }
 
-    public int getNotificationIndex() {
+    static public int getNotificationIndex() {
         return notificationIndex;
     }
 
-    public void setNotificationIndex(int notificationIndex) {
+    static public void setNotificationIndex(int notificationIndex) {
         BaseMessageReceiver.notificationIndex = notificationIndex;
     }
 

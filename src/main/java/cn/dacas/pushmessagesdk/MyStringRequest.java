@@ -27,13 +27,9 @@ public class MyStringRequest extends AsynRequest<String> {
         String str = null;
         try {
             switch (codeType){
-                //Add Aliases status == 200
-                case PushMsgManager.CommCodeType.NET_AddAliases:
-                    str = (response.statusCode == 200)? "Ok":"Err";
-                    break;
                 //Add status == 201 Created
                 case PushMsgManager.CommCodeType.NET_Add:
-                    str = (response.statusCode == 200)? "Ok":"Err";
+                    str = (response.statusCode == 201)? "Ok":"Err";
                     break;
                 //Deleted status == 204 No Content
                 case PushMsgManager.CommCodeType.NET_Delete:

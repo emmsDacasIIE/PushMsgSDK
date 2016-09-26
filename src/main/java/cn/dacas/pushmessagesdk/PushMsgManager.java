@@ -4,6 +4,9 @@ import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.net.http.AndroidHttpClient;
 import android.os.Handler;
 import android.os.Message;
 import android.provider.Settings;
@@ -11,14 +14,27 @@ import android.telephony.TelephonyManager;
 import android.util.Log;
 
 import com.android.volley.AuthFailureError;
+import com.android.volley.NetworkResponse;
+import com.android.volley.ParseError;
 import com.android.volley.Request;
 import com.android.volley.RequestQueue;
 import com.android.volley.Response;
 import com.android.volley.VolleyError;
+import com.android.volley.toolbox.HttpHeaderParser;
+import com.android.volley.toolbox.HttpStack;
 import com.android.volley.toolbox.JsonArrayRequest;
 import com.android.volley.toolbox.JsonObjectRequest;
+import com.android.volley.toolbox.StringRequest;
 import com.android.volley.toolbox.Volley;
 
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpDelete;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.params.HttpConnectionParams;
+import org.apache.http.params.HttpParams;
 import org.eclipse.paho.android.service.MqttAndroidClient;
 import org.eclipse.paho.client.mqttv3.DisconnectedBufferOptions;
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
@@ -29,15 +45,20 @@ import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
-import org.eclipse.paho.client.mqttv3.util.Strings;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import it.sauronsoftware.base64.Base64;
 
@@ -54,20 +75,21 @@ public class PushMsgManager {
      static private MqttAndroidClient mqttAndroidClient;
      static private SharedPreferences sharedPreferences = null;
     //通知主题队列
-     static private List<String> notifyTopicLists = new ArrayList<>();
+     static volatile private List<String> notifyTopicLists = new ArrayList<>();
     //普通消息主题队列
-     static private List<String> msgTopicLists = new ArrayList<>();
-     private String regServerUrl ="";//注册服务器
-     private String pushServerUrl = "";//消息推送服务器
-     private String clientId, clientSecret;
-     private String regId = "";//注册后，由Server返回
+     static volatile private List<String> msgTopicLists = new ArrayList<>();
+     private volatile String regServerUrl ="";//注册服务器
+     private volatile String pushServerUrl = "";//消息推送服务器
+     private volatile String clientId, clientSecret;
+     private volatile String regId = "";//注册后，由Server返回
      private RequestQueue mQueue = null;
      private Context context;
      private HashMap<String,String> headers = new HashMap<>();
 
-     static private Class notificationToActivity = null;
-     static private int notificationIndex = 402;
+     static private volatile Class notificationToActivity = null;
      private int icon;
+
+    private volatile boolean isWork = false;
 
     public interface CommCodeType{
         int NET_GetRedId = 1;
@@ -76,7 +98,6 @@ public class PushMsgManager {
         int NET_Delete = 4;
         int NET_GetAccounts = 5;
         int NET_GetTopics = 6;
-        int NET_AddAliases= 7;
 
         int TO_GET_TOPICS = 10;
         int TO_STARTWORK = 11;
@@ -99,8 +120,14 @@ public class PushMsgManager {
                         sendMsgBroadcast(ActionType.err,e.getMessage());
                     }
                     break;
-                case CommCodeType.NET_AddAliases:
-                    subscribeToTopicLists(getNewMList(msg.what,parseStringToList(msg.obj.toString())));
+                case CommCodeType.NET_GetAliase:
+                    onGetNewTopic(msg.what,msg.obj.toString());
+                    break;
+                case CommCodeType.NET_GetAccounts:
+                    onGetNewTopic(msg.what,msg.obj.toString());
+                    break;
+                case CommCodeType.NET_GetTopics:
+                    onGetNewTopic(msg.what,msg.obj.toString());
                     break;
                 default:
                     //Toast.makeText(context,msg.toString(),Toast.LENGTH_SHORT).show();
@@ -110,12 +137,64 @@ public class PushMsgManager {
         }
     };
 
+    private void deleteAndUnsubTopic(String topic,List<String> list){
+        if(list.contains(topic)) {
+            list.remove(topic);
+        }
+    }
+    private void deleteAndUnsubTopicList(List<String> topicList,List<String> list){
+        for (String topic:topicList) {
+            deleteAndUnsubTopic(topic,list);
+        }
+        unSubscribeTopics(topicList);
+    }
+
+    private void saveAndSubNewTopic(String topic,List<String> list){
+        if(!list.contains(topic)) {
+            list.add(topic);
+            if(isWork)
+                subToTopic(topic);
+        }
+    }
+    private void saveAndSubNewTopicList(List<String> topicList,List<String> list){
+        for (String topic:topicList) {
+            saveAndSubNewTopic(topic,list);
+        }
+    }
+
     /**
      * subscribe new topics and save them in Lists
      * @param type topic type
      */
     private void onGetNewTopic(int type, String string){
         List<String> mList = getNewMList(type,parseStringToList(string));
+        List<String> nList = getNewNList(type,parseStringToList(string));
+        saveAndSubNewTopicList(mList,msgTopicLists);
+        saveAndSubNewTopicList(nList,notifyTopicLists);
+    }
+    private void onGetNewTopic(int type, List<String> sList){
+        List<String> mList = getNewMList(type,sList);
+        List<String> nList = getNewNList(type,sList);
+        saveAndSubNewTopicList(mList,msgTopicLists);
+        saveAndSubNewTopicList(nList,notifyTopicLists);
+    }
+    private void onDeleteTopic(int type, List<String> sList){
+        if(sList.size()==0)
+            return;
+        List<String> mList = getNewMList(type,sList);
+        List<String> nList = getNewNList(type,sList);
+        deleteAndUnsubTopicList(mList,msgTopicLists);
+        deleteAndUnsubTopicList(nList,notifyTopicLists);
+    }
+
+    private void unSubscribeTopics(List<String> mList){
+        for (String topic:mList) {
+            try {
+                mqttAndroidClient.unsubscribe(topic);
+            } catch (MqttException e) {
+                e.printStackTrace();
+            }
+        }
     }
     private void addTopicsIntoList() {
         //add regId topics
@@ -192,6 +271,24 @@ public class PushMsgManager {
         editor.commit();
     }
 
+    private  void updateStringData(String key, String newValue){
+        String oldValue = sharedPreferences.getString(key,"");
+        SharedPreferences.Editor editor = sharedPreferences.edit();
+        if (oldValue.equals(""))//原来没有值
+            editor.putString(key,newValue);
+        try {
+            JSONArray jsonArray = new JSONArray(oldValue);
+            JSONArray newValueJsonArray = new JSONArray(newValue);
+            if(newValueJsonArray.length()==0)
+                return;
+            for (int i = 0; i < newValueJsonArray.length() ; i++) {
+                jsonArray.put(newValueJsonArray.getString(i));
+            }
+            editor.putString(key,jsonArray.toString());
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
     /**
      * 获得已经保存的值
      * @param key 键
@@ -282,6 +379,7 @@ public class PushMsgManager {
 
     public void registerPush(String url, String clientId, String clientSecret) throws Exception {
         //生成 http header
+        this.regServerUrl = url;
         this.clientId  = clientId;
         this.clientSecret = clientSecret;
         String authorizationKey = Base64.encode(this.clientId+":"+ this.clientSecret);
@@ -289,7 +387,7 @@ public class PushMsgManager {
         headers.put("Content-Type", "application/json; charset=UTF-8");
 
         /**实验，应删除**/
-        putStringData("reg_id","");
+        //putStringData("reg_id","");
         //判断reg_id 是否已经存在
         regId = getStringData("reg_id","");
         Log.d(TAG, "reg_id:"+regId);
@@ -300,9 +398,6 @@ public class PushMsgManager {
          }
 
         //没有注册，则开始注册
-         this.regServerUrl = url;
-         this.clientId = clientId;
-         this.clientSecret = clientSecret;
          try{
              //相服务器注册当前应用
              //上传IMEI
@@ -352,6 +447,7 @@ public class PushMsgManager {
                     mqttAndroidClient.setBufferOpts(disconnectedBufferOptions);
                     subscribeToTopicLists(notifyTopicLists);
                     subscribeToTopicLists(msgTopicLists);
+                    isWork = true;
                 }
 
                 @Override
@@ -447,7 +543,7 @@ public class PushMsgManager {
     static public void cancelNotification(Context context){
         NotificationManager notificationManager = (NotificationManager) context
                 .getSystemService(Context.NOTIFICATION_SERVICE);
-        notificationManager.cancel(notificationIndex);
+        notificationManager.cancel(BaseMessageReceiver.getNotificationIndex());
         setNotifyMsgCounter(0);
     }
 
@@ -581,54 +677,84 @@ public class PushMsgManager {
         }
     }
 
+    private List<String> parseJSONArrayToList(JSONArray jsonArray){
+        List<String> list =new ArrayList<>();
+        for (int i = 0; i < jsonArray.length() ; i++) {
+            try {
+                list.add(jsonArray.getString(i));
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+        }
+        return list;
+    }
+
+
     /**
      * 向服务器添加JsonArray数据
      * @param comm Method POST/DELETE
-     * @param type 0:alias ; 1:account; 2:news topic
+     * @param type 2:alias ; 5:account; 6:news topic
      * @param jsonArray 数据
      */
-    public void sendJsonArrayToServer(int comm,int type, final JSONArray jsonArray){
+    public void sendJsonArrayToServer(int comm, final int type, final JSONArray jsonArray){
         String url = regServerUrl+"/"+ regId;
+        final List<String> jsonArrayList = parseJSONArrayToList(jsonArray);
+        if(jsonArrayList.size()==0)
+            return;
+
         final int method = comm;
-        int commType;
+        final int commType;
         if(method!= Request.Method.POST&&method!= Request.Method.DELETE)
             return;
         final String tag ;
         switch (type){
-            case 0:
-                tag = "/aliases";
-                if(method == Request.Method.POST)
-                    commType = CommCodeType.NET_AddAliases;
-                else
-                    commType = CommCodeType.NET_Delete;
-                break;
-            case 1:
-                tag = "/user_accounts";
-                if(method == Request.Method.POST)
+            case CommCodeType.NET_GetAliase:
+                tag = "aliases";
+                if(method == Request.Method.POST) {
                     commType = CommCodeType.NET_Add;
-                else
+                }
+                else {
                     commType = CommCodeType.NET_Delete;
+                }
                 break;
-            case 2:
-                tag = "/topics";
-                if(method == Request.Method.POST)
+            case CommCodeType.NET_GetAccounts:
+                tag = "user_accounts";
+                if(method == Request.Method.POST) {
                     commType = CommCodeType.NET_Add;
-                else
+                }
+                else {
                     commType = CommCodeType.NET_Delete;
+                }
+                break;
+            case CommCodeType.NET_GetTopics:
+                tag = "topics";
+                if(method == Request.Method.POST) {
+                    commType = CommCodeType.NET_Add;
+                }
+                else {
+                    commType = CommCodeType.NET_Delete;
+                }
                 break;
             default:
                 return;
         }
         MyStringRequest request = new MyStringRequest(method,
-                url+tag, commType, headers, new Response.Listener<String>() {
+                url+"/"+tag, commType, headers, new Response.Listener<String>() {
             @Override
             public void onResponse(String s) {
                 if(s.equals("Err"))
                     sendMsgBroadcast(ActionType.err,
                             ((method== Request.Method.POST)? "ADD": "DELETE")+" Err!"+tag);
-                else
-                    sendHandleMsg(((method== Request.Method.POST)? CommCodeType.NET_Add: CommCodeType.NET_Delete),
-                            ((method== Request.Method.POST)? "ADD": "DELETE")+" Ok!"+tag);
+                else//add or delete to Server successfully
+                {
+                    if(method==Request.Method.POST)
+                        onGetNewTopic(type,jsonArrayList);
+                    else if (method == Request.Method.DELETE)
+                        onDeleteTopic(type,jsonArrayList);
+                    getJsonArrayFormServer(type);
+                    sendHandleMsg(((method == Request.Method.POST) ? CommCodeType.NET_Add : CommCodeType.NET_Delete),
+                            ((method == Request.Method.POST) ? "ADD" : "DELETE") + " Ok!" + tag);
+                }
             }
         },errorListener){
             @Override
@@ -734,24 +860,65 @@ public class PushMsgManager {
         return result;
     }
 
-    /**
-     * test method
-     * @param s client id
-     */
-    void setClientId(String s){
-        this.clientId = s;
+
+    public void deleteHttpRequest(int type, final JSONArray jsonArray)
+    {
+        StringRequest stringRequest = new StringRequest(Request.Method.DELETE,
+                regServerUrl+"/"+regId+"/aliases",
+                new Response.Listener<String>() {
+            @Override
+            public void onResponse(String response) {
+            }
+        },errorListener){
+            @Override
+            public Map<String, String> getHeaders() throws AuthFailureError {
+                return headers;
+            }
+
+            @Override
+            public byte[] getBody() throws AuthFailureError {
+                return jsonArray.toString().getBytes();
+            }
+            @Override
+            protected Response<String> parseNetworkResponse(NetworkResponse response) {
+                String str = "";
+                try {
+                    switch (getMethod()){
+                        //Add status == 201 Created
+                        case Method.POST:
+                            str = (response.statusCode == 201)? "Ok":"Err";
+                            break;
+                        //Deleted status == 204 No Content
+                        case Method.DELETE:
+                            str = (response.statusCode == 204)? "Ok":"Err";
+                            break;
+                        //Other Cases with response
+                        default:
+                            str = new String(response.data, HttpHeaderParser.parseCharset(response.headers));
+                    }
+                    return Response.success(str,HttpHeaderParser.parseCacheHeaders(response));
+                } catch (UnsupportedEncodingException e) {
+                    return Response.error(new ParseError(e));
+                }
+            }
+        };
+        mQueue.add(stringRequest);
+        /*try {
+            //regServerUrl+"/"+regId+"/aliases"
+            HttpURLConnection connection = (HttpURLConnection) new URL(regServerUrl+"/"+regId+"/aliases").openConnection();
+            connection.setRequestMethod("DELETE");
+            connection.setConnectTimeout(8000);
+            connection.setReadTimeout(8000);
+            for (String key :headers.keySet()) {
+                connection.setRequestProperty(key,headers.get(key));
+            }
+            //Log.d(TAG, connection.getRequestMethod());
+            DataOutputStream out = new DataOutputStream(connection.getOutputStream());
+            out.write(jsonArray.toString().getBytes());
+            Log.d(TAG, "Response Code: "+connection.getResponseCode());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }*/
     }
 
-    /**
-     * test method
-     * @param regId reg_id
-     */
-    void setRegId(String regId){
-        this.regId = regId;
-    }
-
-    /**
-     * test method
-     */
-    public PushMsgManager(){}
 }
