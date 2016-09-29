@@ -49,8 +49,11 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -863,62 +866,42 @@ public class PushMsgManager {
 
     public void deleteHttpRequest(int type, final JSONArray jsonArray)
     {
-        StringRequest stringRequest = new StringRequest(Request.Method.DELETE,
-                regServerUrl+"/"+regId+"/aliases",
-                new Response.Listener<String>() {
+        final String Url = "http://192.168.151.45:8082/Json?";
+        new Thread(new Runnable() {
             @Override
-            public void onResponse(String response) {
-            }
-        },errorListener){
-            @Override
-            public Map<String, String> getHeaders() throws AuthFailureError {
-                return headers;
-            }
-
-            @Override
-            public byte[] getBody() throws AuthFailureError {
-                return jsonArray.toString().getBytes();
-            }
-            @Override
-            protected Response<String> parseNetworkResponse(NetworkResponse response) {
-                String str = "";
-                try {
-                    switch (getMethod()){
-                        //Add status == 201 Created
-                        case Method.POST:
-                            str = (response.statusCode == 201)? "Ok":"Err";
-                            break;
-                        //Deleted status == 204 No Content
-                        case Method.DELETE:
-                            str = (response.statusCode == 204)? "Ok":"Err";
-                            break;
-                        //Other Cases with response
-                        default:
-                            str = new String(response.data, HttpHeaderParser.parseCharset(response.headers));
+            public void run() {
+                HttpURLConnection connection =null;
+                try{
+                    URL url = new URL(Url);
+                    connection= (HttpURLConnection) url.openConnection();
+                    connection.setRequestMethod("DELETE");
+                    connection.setConnectTimeout(8000);
+                    connection.setReadTimeout(8000);
+                    for (String key :headers.keySet()) {
+                        connection.setRequestProperty(key,headers.get(key));
                     }
-                    return Response.success(str,HttpHeaderParser.parseCacheHeaders(response));
-                } catch (UnsupportedEncodingException e) {
-                    return Response.error(new ParseError(e));
+
+                    //Log.d(TAG, connection.getRequestMethod());
+                    DataOutputStream out = new DataOutputStream(connection.getOutputStream());
+                    out.write(jsonArray.toString().getBytes());
+                    InputStream in = connection.getInputStream();
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+                    StringBuilder response = new StringBuilder();
+
+                    String line;
+                    while ((line=reader.readLine())!=null){
+                        response.append(line);
+                    }
+                    Log.d(TAG, "Response Code: "+connection.getResponseCode()+" DATA:"+response.toString());
+
+                }catch (Exception e){
+                    e.printStackTrace();
+                }finally {
+                    if(connection!=null)
+                        connection.disconnect();
                 }
             }
-        };
-        mQueue.add(stringRequest);
-        /*try {
-            //regServerUrl+"/"+regId+"/aliases"
-            HttpURLConnection connection = (HttpURLConnection) new URL(regServerUrl+"/"+regId+"/aliases").openConnection();
-            connection.setRequestMethod("DELETE");
-            connection.setConnectTimeout(8000);
-            connection.setReadTimeout(8000);
-            for (String key :headers.keySet()) {
-                connection.setRequestProperty(key,headers.get(key));
-            }
-            //Log.d(TAG, connection.getRequestMethod());
-            DataOutputStream out = new DataOutputStream(connection.getOutputStream());
-            out.write(jsonArray.toString().getBytes());
-            Log.d(TAG, "Response Code: "+connection.getResponseCode());
-        } catch (IOException e) {
-            e.printStackTrace();
-        }*/
+        }).start();
     }
 
 }
